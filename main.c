@@ -21,6 +21,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "dht11.h"
 #include<stdio.h>
 /* USER CODE END Includes */
 
@@ -65,34 +66,34 @@ static void MX_ADC1_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+uint8_t gearIndex = 0;
+char *gear[] = { "ON", "GR", "GN", "G1", "G2", "G3", "G4", "CO" };
 CAN_TxHeaderTypeDef TxHeader;
-CAN_RxHeaderTypeDef RxHeader;
-uint8_t RxData[9];
-
+//CAN_RxHeaderTypeDef RxHeader;
 uint32_t TxMailbox;
-
 uint8_t TxData[9];
-RTC_TimeTypeDef Time;
-RTC_DateTypeDef sDate;
-int32_t adc_value;
-uint8_t flag1 = 0;
-uint8_t flag2 = 0;
+
 int _write(int file, char *str, int size) {
 	HAL_UART_Transmit(&huart1, str, size, HAL_MAX_DELAY);
 	return size;
 }
 
 uint8_t read_digital_keypad(uint8_t detection_type);
+
 #define STATE 0
 #define LEVEL 1
 #define SWITCH1 1
 #define SWITCH2 2
+#define SWITCH3 3
 #define ALL_RELEASED 0
-#define CAN_ID_ENGINE		0X040
-#define CAN_ID_TIME			0X050
-#define CAN_ID_INDICATOR	0X060
+
+#define CAN_ID_TEMP		0X010
+#define CAN_ID_SPEED	0X020
+#define CAN_ID_GEAR		0X030
+
 uint8_t read_digital_keypad(uint8_t detection_type) {
-	static uint8_t once1 = 1, once2 = 1;
+	static uint8_t once1 = 1, once2 = 1, once3 = 1;
 	if (detection_type == STATE) {
 		uint8_t key = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_5);
 		if (key == 1 && once1) {
@@ -108,6 +109,13 @@ uint8_t read_digital_keypad(uint8_t detection_type) {
 		} else if (key == 0)
 			once2 = 1;
 
+		key = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7);
+		if (key == 1 && once3) {
+			once3 = 0;
+			return SWITCH3;
+		} else if (key == 0)
+			once3 = 1;
+
 		return ALL_RELEASED;
 	} else if (detection_type == LEVEL) {
 		uint8_t key = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_5);
@@ -116,93 +124,95 @@ uint8_t read_digital_keypad(uint8_t detection_type) {
 		key = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_6);
 		if (key == 1)
 			return SWITCH2;
-
+		key = HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_7);
+		if (key == 1)
+			return SWITCH3;
 	}
 	return ALL_RELEASED;
 
 }
 
-void send_engine(void) {
-	HAL_ADC_Start(&hadc1);
-	HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
-	adc_value = HAL_ADC_GetValue(&hadc1) / 40.95;
-	HAL_ADC_Stop(&hadc1);
-	printf("Engine(RPM)->%d\r\n", adc_value);
 
-	TxHeader.StdId = 0x040;
+
+void send_temp(void) {
+	DHT11_Data_t data;
+
+	Read_Temp_Hum(&data);
+	printf("Temperature : %d\r\n", data.temperature);
+	//HAL_Delay(1000);
+
+	TxHeader.StdId = 0x010;
 	TxHeader.IDE = CAN_ID_STD;
 	TxHeader.RTR = CAN_RTR_DATA;
 	TxHeader.DLC = 1;
 
-	TxData[0] = adc_value;
+	TxData[0] = data.temperature;
 
 	HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
 }
+void send_speed(void) {
+	int32_t adc_value;
+	uint8_t speed;
+	HAL_ADC_Start(&hadc1);
+	HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
+	adc_value = HAL_ADC_GetValue(&hadc1);
+	HAL_ADC_Stop(&hadc1);
+	speed = (adc_value * 99) / 3806;
+	printf("SPEED->%d\r\n", speed);
+	//HAL_Delay(500);
+	TxHeader.StdId = 0x020;
+	TxHeader.IDE = CAN_ID_STD;
+	TxHeader.RTR = CAN_RTR_DATA;
+	TxHeader.DLC = 1;
+	TxData[0] = speed;
+	HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
+}
 
-void send_time(void) {
-	HAL_RTC_GetTime(&hrtc, &Time, RTC_FORMAT_BIN);
-	HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
-	printf("%02d:%02d:%02d\n\r", Time.Hours, Time.Minutes, Time.Seconds);
+void send_gear(void) {
 
-	TxHeader.StdId = 0x050;
+	uint8_t key = read_digital_keypad(STATE);
+	if (key == SWITCH1) {
+		if (gearIndex < 6) {
+			gearIndex++;
+			printf("%s\r\n", gear[gearIndex]);
+		}
+
+	} else if (key == SWITCH2) {
+		if (gearIndex > 1) {
+			gearIndex--;
+			printf("%s\r\n", gear[gearIndex]);
+		}
+
+	}
+
+	else if (key == SWITCH3)
+
+	{
+		gearIndex = 7;
+		printf("%s\r\n", gear[gearIndex]);
+	}
+	TxHeader.StdId = 0x030;
 	TxHeader.IDE = CAN_ID_STD;
 	TxHeader.RTR = CAN_RTR_DATA;
 	TxHeader.DLC = 3;
-
-	TxData[0] = Time.Hours;
-	TxData[1] = Time.Minutes;
-	TxData[2] = Time.Seconds;
-
+	TxData[0] = gear[gearIndex][0];
+	TxData[1] = gear[gearIndex][1];
+	TxData[2]='\0';
 	HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
 }
 
-void send_indicator(void) {
-	uint8_t key = read_digital_keypad(STATE);
-	if (key == SWITCH1) {
-		flag1 = 1;
-		flag2 = 0;
-		HAL_GPIO_WritePin(GPIOG, GPIO_PIN_12, GPIO_PIN_RESET);
-	} else if (key == SWITCH2) {
-		flag2 = 1;
-		flag1 = 0;
-		HAL_GPIO_WritePin(GPIOG, GPIO_PIN_11, GPIO_PIN_RESET);
-	}
-	if (flag1 == 1) {
-		HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_11);
-		TxData[0] = 1;
-
-	} else {
-		HAL_GPIO_WritePin(GPIOG, GPIO_PIN_11, GPIO_PIN_RESET);
-		    TxData[0] = 0;
-	}
-	if (flag2 == 1) {
-		HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_12);
-		TxData[1] = 1;
-
-	} else {
-		HAL_GPIO_WritePin(GPIOG, GPIO_PIN_12, GPIO_PIN_RESET);
-				    TxData[1] = 0;
-	}
-
-	TxHeader.StdId = 0x060;
-	TxHeader.IDE = CAN_ID_STD;
-	TxHeader.RTR = CAN_RTR_DATA;
-	TxHeader.DLC = 2;
-	HAL_CAN_AddTxMessage(&hcan1, &TxHeader, TxData, &TxMailbox);
-}
 
 /*void HAL_CAN_RxFifo0MsgPendingCallback(CAN_HandleTypeDef *hcan) {
-	if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
-		char msg[30];
-		// Formats the received byte as both a character and a Hex value
-		//sprintf(msg, "Recv: %c (0x%02X)\r\n", RxData[0], RxData[0]);
-		sprintf(msg, (uint8_t*) "Recv: %s\r\n", RxData);
-		HAL_UART_Transmit(&huart1, (uint8_t*) msg, (uint16_t) strlen(msg),
-		HAL_MAX_DELAY);
+ if (HAL_CAN_GetRxMessage(hcan, CAN_RX_FIFO0, &RxHeader, RxData) == HAL_OK) {
+ char msg[30];
 
-		HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_13); // Toggle Green LED
-	}
-}*/
+ sprintf(msg, (uint8_t*) "Recv: %s\r\n", RxData);
+ HAL_UART_Transmit(&huart1, (uint8_t*) msg, (uint16_t) strlen(msg),
+ HAL_MAX_DELAY);
+
+ HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_13); // Toggle Green LED
+ }
+ }*/
 /* USER CODE END 0 */
 
 /**
@@ -239,10 +249,11 @@ int main(void)
   MX_RTC_Init();
   MX_ADC1_Init();
   /* USER CODE BEGIN 2 */
-	/*TxHeader.StdId = 0x103;
+		/*TxHeader.StdId = 0x103;
 	 TxHeader.IDE = CAN_ID_STD;   // Use Standard ID
 	 TxHeader.RTR = CAN_RTR_DATA; // Sending data
 	 TxHeader.DLC = 8;            // Length is 1 byte*/
+
 
 	 HAL_Delay(10);
 
@@ -258,47 +269,71 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 
 	while (1) {
-		HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_13);
-		//send_engine();
-		send_time();
-		send_indicator();
 
-		HAL_Delay(1000);
+		send_temp();
+		send_speed();
+		send_gear();
+
+		//temperature
+		/*Read_Temp_Hum(&data);
+		 printf("Temperature : %d\r\n",data.temperature);
+		 HAL_Delay(1000);*/
+
+		//speed
 		/*HAL_ADC_Start(&hadc1);
 		 HAL_ADC_PollForConversion(&hadc1, HAL_MAX_DELAY);
 		 adc_value = HAL_ADC_GetValue(&hadc1);
 		 HAL_ADC_Stop(&hadc1);
-		 printf("Engine(RPM)->%d\r\n",adc_value);
-		 HAL_Delay(250);*/
+		 printf("SPEED->%d\r\n", (adc_value*99)/3806);
+		 HAL_Delay(500);*/
 
-		/*HAL_RTC_GetTime(&hrtc, &Time, RTC_FORMAT_BIN);
-		 HAL_RTC_GetDate(&hrtc, &sDate, RTC_FORMAT_BIN);
-		 printf("%02d:%02d:%02d\n\r", Time.Hours, Time.Minutes, Time.Seconds);
-		 HAL_Delay(1000);*/
+		//gear
+		/*uint8_t key = read_digital_keypad(STATE);
+		 if (key == SWITCH1) {
+		 if (gearIndex < 6) {
+		 gearIndex++;
+		 printf("%s\r\n", gear[gearIndex]);
+		 }
 
-		//Inidcator
-		/*uint8_t key =read_digital_keypad(STATE);
-		 if(key==SWITCH1)
-		 {
-		 flag1=1;
-		 flag2=0;
-		 HAL_GPIO_WritePin(GPIOG, GPIO_PIN_12,GPIO_PIN_RESET);
+		 } else if (key == SWITCH2) {
+		 if (gearIndex > 1) {
+		 gearIndex--;
+		 printf("%s\r\n", gear[gearIndex]);
 		 }
-		 else if(key==SWITCH2)
-		 {
-		 flag2=1;
-		 flag1=0;
-		 HAL_GPIO_WritePin(GPIOG, GPIO_PIN_11,GPIO_PIN_RESET);
+
 		 }
-		 if(flag1==1)
+
+		 else if (key == SWITCH3)
+
 		 {
-		 HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_11);
-		 HAL_Delay(500);
+		 gearIndex = 7;
+		 printf("%s\r\n", gear[gearIndex]);
+		 }*/
+
+		/*if(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_4)==1)
+		 {
+		 if(gearIndex<6)
+		 {
+		 gearIndex++;
 		 }
-		 if(flag2==1)
+		 printf("%s\r\n",gear[gearIndex]);
+		 HAL_Delay(200);
+		 }
+		 if(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_5)==1)
 		 {
-		 HAL_GPIO_TogglePin(GPIOG, GPIO_PIN_12);
-		 HAL_Delay(500);
+		 if(gearIndex>1)
+		 {
+		 gearIndex--;
+		 }
+		 printf("%s\r\n",gear[gearIndex]);
+		 HAL_Delay(200);
+		 }
+		 if(HAL_GPIO_ReadPin(GPIOA, GPIO_PIN_6)==1)
+		 {
+		 gearIndex=7;
+		 printf("%s\r\n",gear[gearIndex]);
+		 HAL_Delay(200);
+
 		 }*/
 
     /* USER CODE END WHILE */
@@ -511,8 +546,8 @@ static void MX_RTC_Init(void)
 
   /** Initialize RTC and set the Time and Date
   */
-  sTime.Hours = 14;
-  sTime.Minutes = 43;
+  sTime.Hours = 9;
+  sTime.Minutes = 22;
   sTime.Seconds = 0;
   sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
   sTime.StoreOperation = RTC_STOREOPERATION_RESET;
@@ -586,7 +621,13 @@ static void MX_GPIO_Init(void)
   __HAL_RCC_GPIOG_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOG, GPIO_PIN_13|GPIO_PIN_14, GPIO_PIN_RESET);
+
+  /*Configure GPIO pins : PA0 PA7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_0|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
   /*Configure GPIO pins : PA5 PA6 */
   GPIO_InitStruct.Pin = GPIO_PIN_5|GPIO_PIN_6;
@@ -594,8 +635,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_PULLDOWN;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : PG11 PG12 PG13 PG14 */
-  GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13|GPIO_PIN_14;
+  /*Configure GPIO pins : PG13 PG14 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13|GPIO_PIN_14;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
